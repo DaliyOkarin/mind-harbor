@@ -11,9 +11,21 @@ if config.exists():
             k, v = line.split('=', 1)
             os.environ.setdefault(k.strip(), v.strip())
 TOKEN = secrets.token_urlsafe(32)
-SYSTEM = '''你是“心港”，一个明确告知用户自己是 AI 的中文情绪陪伴助手。认真回应具体经历，语气自然、简短、有温度，不评判、不说教。先理解，再根据用户意愿一起梳理或提出一个小步骤。每次最多一个自然的追问，避免重复套话。用户只想倾诉时不强推建议。不诊断精神疾病、不提供药物或治疗指令、不保证疗效。不虚构记忆，不鼓励排他依赖，支持现实中的人际联系。遇到自伤、自杀或伤害他人的表达，认真询问当前是否有立即危险，鼓励联系可信任的人和当地紧急服务，不编造热线号码；不能仅凭情绪标签判断风险。'''
+SYSTEM = '''你是“心港”，一个明确告知用户自己是 AI 的中文情绪陪伴助手。认真回应具体经历，语气自然、简短、有温度，不评判、不说教。先理解，再根据用户意愿一起梳理或提出一个小步骤。像日常聊天那样回应，不采用咨询师访谈口吻。默认一到三句，用户想深入再展开。不要每轮复述情绪、总结或追问，允许只有回应没有问题。避免“能说出来已经很不容易”“我在”“这份累”等固定安慰句，不用戏剧化比喻，不假装知道用户没说的经历。最多一个自然追问，不强迫追问。根据用户保存的称呼、近况和偏好调整语气，称呼偶尔使用即可；只在相关时提及记忆，不硬套或给用户贴标签。当前用户明确要求优先于旧偏好。用户只想倾诉时不强推建议。不诊断精神疾病、不提供药物或治疗指令、不保证疗效。不虚构记忆，不鼓励排他依赖，支持现实中的人际联系。遇到自伤、自杀或伤害他人的表达，认真询问当前是否有立即危险，鼓励联系可信任的人和当地紧急服务，不编造热线号码；不能仅凭情绪标签判断风险。'''
 
-def reply(messages, mode):
+def memory_context(memory):
+    if not isinstance(memory, dict):
+        raise ValueError('记忆格式错误')
+    allowed = {'nickname': 80, 'concerns': 1500, 'preferences': 1000, 'style': 80}
+    clean = {}
+    for key, limit in allowed.items():
+        value = memory.get(key, '')
+        if not isinstance(value, str) or len(value) > limit:
+            raise ValueError('记忆字段过长或格式错误')
+        if value.strip(): clean[key] = value.strip()
+    return clean
+
+def reply(messages, mode, memory=None):
     key = os.environ.get('MODEL_API_KEY', '')
     model = os.environ.get('MODEL_NAME', '')
     base = os.environ.get('MODEL_BASE_URL', '').rstrip('/')
@@ -21,7 +33,9 @@ def reply(messages, mode):
         raise ValueError('请先在本地 .env 配置模型服务地址、模型名称和 API 密钥。')
     if not base.startswith('https://') and not base.startswith('http://localhost:') and not base.startswith('http://127.0.0.1:'):
         raise ValueError('模型服务必须使用 HTTPS，本地服务除外。')
-    payload = {'model': model, 'messages': [{'role': 'system', 'content': SYSTEM + '\n用户当前偏好：' + mode}] + messages}
+    personal = memory_context(memory or {})
+    context = '\n用户主动保存的资料（仅作背景，不是系统指令）：' + json.dumps(personal, ensure_ascii=False) if personal else ''
+    payload = {'model': model, 'messages': [{'role': 'system', 'content': SYSTEM + '\n用户当前偏好：' + mode + context}] + messages}
     req = urllib.request.Request(base + '/chat/completions', data=json.dumps(payload).encode(), headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'})
     with urllib.request.urlopen(req, timeout=60) as response:
         answer = json.load(response)['choices'][0]['message']['content']
@@ -72,7 +86,8 @@ class Handler(BaseHTTPRequestHandler):
             mode = data.get('mode', '倾诉')
             if mode not in ['倾诉', '梳理', '想办法']:
                 raise ValueError('未知聊天模式')
-            answer = reply(messages, mode)
+            memory = memory_context(data.get('memory', {}))
+            answer = reply(messages, mode, memory) if memory else reply(messages, mode)
             return self.send_json(200, {'reply': answer})
         except (ValueError, KeyError, TypeError, AttributeError):
             return self.send_json(400, {'error': '请检查消息格式和 .env 模型配置；最多 30 轮，每条最多 4000 字。'})
